@@ -9,7 +9,7 @@ https://arxiv.org/abs/2102.09844
 <img src="models/egnn.png" width="400">
 
 
-
+**This code works only on 5-body and runs with the strong results**
 
 **Abstract**: This paper introduces a new model to learn graph neural networks equivariant to rotations, translations, reflections and permutations called E(n)-Equivariant Graph Neural Networks (EGNNs). In contrast with existing methods, our work does not require computationally expensive higher-order representations in intermediate layers while it still achieves competitive or better performance. In addition, whereas existing methods are limited to equivariance on 3 dimensional spaces, our model is easily scaled to higher-dimensional spaces. We demonstrate the effectiveness of our method on dynamical systems modelling, representation learning in graph autoencoders and predicting molecular properties.
 
