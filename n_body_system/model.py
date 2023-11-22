@@ -67,7 +67,7 @@ class EGNN(nn.Module):
 
 
 class EGNN_vel(nn.Module):
-    def __init__(self, in_node_nf, in_edge_nf, hidden_nf, device='cpu', act_fn=nn.SiLU(), n_layers=4, coords_weight=1.0, recurrent=False, norm_diff=False, tanh=False):
+    def __init__(self, in_node_nf, in_edge_nf, hidden_nf, device='cuda', act_fn=nn.SiLU(), n_layers=4, coords_weight=1.0, recurrent=False, norm_diff=False, tanh=False):
         super(EGNN_vel, self).__init__()
         self.hidden_nf = hidden_nf
         self.device = device
@@ -107,15 +107,20 @@ class RF_vel(nn.Module):
         return x
         
 class EGNN_vel_feat(nn.Module):
-    def __init__(self, in_node_nf, in_edge_nf, hidden_nf, device='cpu', act_fn=nn.SiLU(), n_layers=4, coords_weight=1.0, recurrent=False, norm_diff=False, tanh=False, model_config=dict()):
+    def __init__(self, in_node_nf, in_edge_nf, hidden_nf, device='cuda', act_fn=nn.SiLU(), n_layers=4, coords_weight=1.0, recurrent=False, norm_diff=False, tanh=False, model_config=dict(), color_steps=3, so=False, one_wl=False):
         super(EGNN_vel_feat, self).__init__()
         self.hidden_nf = hidden_nf
         self.device = device
         self.n_layers = n_layers
         self.model_config = model_config
         self.embedding = nn.Linear(in_node_nf, self.hidden_nf)
-        for i in range(0, n_layers):
-            self.add_module("gcl_%d" % i, E_GCL_vel_feat(self.hidden_nf, self.hidden_nf, self.hidden_nf, edges_in_d=in_edge_nf, act_fn=act_fn, coords_weight=coords_weight, recurrent=recurrent, norm_diff=norm_diff, tanh=tanh, model_config=self.model_config))
+        
+        if one_wl:   
+          for i in range(0, n_layers):
+              self.add_module("gcl_%d" % i, E_GCL_vel_feat(self.hidden_nf, self.hidden_nf, self.hidden_nf, edges_in_d=in_edge_nf, act_fn=act_fn, coords_weight=coords_weight, recurrent=recurrent, norm_diff=norm_diff, tanh=tanh, model_config=self.model_config, color_steps=color_steps, so=so, one_wl=(i==0)))
+        else:
+           for i in range(0, n_layers):
+              self.add_module("gcl_%d" % i, E_GCL_vel_feat(self.hidden_nf, self.hidden_nf, self.hidden_nf, edges_in_d=in_edge_nf, act_fn=act_fn, coords_weight=coords_weight, recurrent=recurrent, norm_diff=norm_diff, tanh=tanh, model_config=self.model_config, color_steps=color_steps, so=so, one_wl=one_wl))
         self.to(self.device)
 
 

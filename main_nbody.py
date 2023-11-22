@@ -11,7 +11,7 @@ parser = argparse.ArgumentParser(description='VAE MNIST Example')
 parser.add_argument('--exp_name', type=str, default='exp_1', metavar='N', help='experiment_name')
 parser.add_argument('--batch_size', type=int, default=100, metavar='N',
                     help='input batch size for training (default: 128)')
-parser.add_argument('--epochs', type=int, default=10000, metavar='N',
+parser.add_argument('--epochs', type=int, default=300, metavar='N',
                     help='number of epochs to train (default: 10)')
 
 parser.add_argument('--no-cuda', action='store_true', default=False,
@@ -54,16 +54,28 @@ parser.add_argument('--norm_diff', type=eval, default=False, metavar='N',
                     help='normalize_diff')
 parser.add_argument('--tanh', type=eval, default=False, metavar='N',
                     help='use tanh')
-
+parser.add_argument('--color_steps', type=int, default=3, metavar='N',
+                    help='coloring refinement steps wl')
+parser.add_argument('--so', type=eval, default=False, metavar='N',
+                    help='use orthogonal vectors')
+parser.add_argument('--lr_layer', type=eval, default=False, metavar='N',
+                    help='lr varies by layer')
+parser.add_argument('--one_wl', type=eval, default=False, metavar='N',
+                    help='lr varies by layer')
+parser.add_argument('--af', type=str, default='silu', metavar='N',
+                    help='available models: gnn, baseline, linear, linear_vel, se3_transformer, egnn_vel, rf_vel, tfn')
 time_exp_dic = {'time': 0, 'counter': 0}
 
 
 args = parser.parse_args()
 args.cuda = not args.no_cuda and torch.cuda.is_available()
 
-
 device = torch.device("cuda" if args.cuda else "cpu")
 loss_mse = nn.MSELoss()
+if args.af =="tanh":
+    act_fn=nn.Tanh()
+elif args.af =="silu":
+    act_fn=nn.SiLU()
 
 print(args)
 try:
@@ -112,7 +124,7 @@ def main():
     elif args.model == 'rf_vel':
         model = RF_vel(hidden_nf=args.nf, edge_attr_nf=2, device=device, act_fn=nn.SiLU(), n_layers=args.n_layers)
     elif args.model == 'egnn_vel_wl':
-        model = EGNN_vel_feat(in_node_nf=1, in_edge_nf=2, hidden_nf=args.nf, device=device, n_layers=args.n_layers, recurrent=True, norm_diff=args.norm_diff, tanh=args.tanh)
+        model = EGNN_vel_feat(in_node_nf=1, in_edge_nf=2, hidden_nf=args.nf, device=device, n_layers=args.n_layers, recurrent=True, norm_diff=args.norm_diff, tanh=args.tanh, color_steps=args.color_steps, so=args.so, act_fn=act_fn, one_wl=args.one_wl)
     elif args.model == 'se3_transformer' or args.model == 'tfn':
         from n_body_system.se3_dynamics.dynamics import OurDynamics as SE3_Transformer
         model = SE3_Transformer(n_particles=5, n_dimesnion=3, nf=int(args.nf/args.degree), n_layers=args.n_layers, model=args.model, num_degrees=args.degree, div=1)
@@ -122,8 +134,11 @@ def main():
         raise Exception("Wrong model specified")
 
     print(model)
-    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-
+    
+    if args.lr_layer and args.model == "egnn_vel_wl":
+      optimizer = optim.Adam([{'params': model.embedding.parameters(), 'lr' :args.lr}, {'params': model.gcl_0.parameters(), 'lr' :args.lr*2}, {'params': model.gcl_1.parameters(), 'lr' : args.lr*2}, {'params': model.gcl_2.parameters(), 'lr' :args.lr}, {'params': model.gcl_3.parameters(), 'lr': args.lr }], weight_decay=args.weight_decay,amsgrad=True)
+    else:
+      optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay,amsgrad=True)
     results = {'epochs': [], 'losess': []}
     best_val_loss = 1e8
     best_test_loss = 1e8
@@ -189,11 +204,12 @@ def train(model, optimizer, epoch, loader, backprop=True):
             edge_attr = torch.cat([edge_attr, loc_dist], 1).detach()  # concatenate all edge properties
             loc_pred = model(nodes, loc.detach(), edges, vel, edge_attr)
         elif args.model == 'egnn_vel_wl':
-            nodes = torch.sqrt(torch.sum(vel ** 2, dim=1)).unsqueeze(1).detach()
+            #nodes = torch.sqrt(torch.sum(vel ** 2, dim=1)).unsqueeze(1).detach()
+            nodes = torch.zeros_like(torch.sqrt(torch.sum(vel ** 2, dim=1)).unsqueeze(1).detach()).cuda()
             rows, cols = edges
             loc_dist = torch.sum((loc[rows] - loc[cols])**2, 1).unsqueeze(1)  # relative distances among locations
             edge_attr = torch.cat([edge_attr, loc_dist], 1).detach()  # concatenate all edge properties
-            loc_pred = model(nodes, loc.detach(), edges, vel, edge_attr)
+            loc_pred = model(nodes, loc.detach().cuda(), edges, vel, edge_attr)
         elif args.model == 'baseline':
             backprop = False
             loc_pred = model(loc)
