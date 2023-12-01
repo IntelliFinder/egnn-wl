@@ -1,5 +1,6 @@
 from torch import nn
 import torch
+import sys
 
 from .wl import TwoFDisInit, TwoFDisLayer
 from models.basis_layers import rbf_class_mapping
@@ -378,6 +379,7 @@ class E_GCL_vel_feat(E_GCL):
         self.one_wl = one_wl
         self.norm_diff = norm_diff
         self.color_steps = color_steps
+        self.hidden_nf = hidden_nf
         self.coord_mlp_vel = nn.Sequential(
             nn.Linear(input_nf, hidden_nf),
             act_fn,
@@ -387,21 +389,26 @@ class E_GCL_vel_feat(E_GCL):
             act_fn,
             nn.Linear(hidden_nf, 1))
         self.edge_mlp_feat = nn.Sequential(
-                    nn.Linear(input_nf * 2 + 10 + hidden_nf + edges_in_d, hidden_nf),
+                    nn.Linear( input_nf*2 + 1 + hidden_nf+edges_in_d, hidden_nf),
                     act_fn,
                     nn.Linear(hidden_nf, hidden_nf),
                     act_fn
             )#maybe add a layer
-            
+        self.edge_mlp_no_wl = nn.Sequential(
+                    nn.Linear(input_nf * 2 + 10 + edges_in_d, hidden_nf),
+                    act_fn,
+                    nn.Linear(hidden_nf, hidden_nf),
+                    act_fn
+            )#maybe add a layer
         self.so = so
         
         
         rbound_upper = 10
         
         
-        ef_dim = 4
+        ef_dim = 3
         self.ef_dim=ef_dim
-        self.init_color = TwoFDisInit(ef_dim=ef_dim*4, k_tuple_dim=hidden_nf, activation_fn=act_fn)
+        self.init_color = TwoFDisInit(ef_dim=(4*ef_dim + hidden_nf), k_tuple_dim=hidden_nf, activation_fn=act_fn)
         self.rbf_fn = rbf_class_mapping["nexpnorm"](
                     num_rbf=ef_dim, 
                     rbound_upper=rbound_upper, 
@@ -444,7 +451,7 @@ class E_GCL_vel_feat(E_GCL):
         rbf_norms = self.rbf_fn(vel_norms.reshape(-1, 1)).reshape(coord.size(0), 5, 5,self.ef_dim) # (B, N, N, ef_dim)
         
         #concatenate along -1 dimension
-        mixed_dist = torch.cat([rbf_coord_dist, rbf_vel_dist, rbf_mixed_dist_coord, rbf_mixed_dist_vel], dim=-1) # (B, N, N, 4)
+        mixed_dist = torch.cat([rbf_coord_dist, rbf_vel_dist, rbf_mixed_dist_coord, rbf_mixed_dist_vel], dim=-1) # (B, N, N, 4*ef_dim)
         
         
         #print(self.rbf_fn(coord_dist.reshape(-1, 1)).size())
@@ -492,11 +499,11 @@ class E_GCL_vel_feat(E_GCL):
             norm = torch.sqrt(radial) + 1
             coord_diff = coord_diff/(norm)
 
-        return feat, coord_diff, coord_prod
+        return feat, radial, coord_diff, coord_prod
         
     def edge_model_feat(self, source, target, radial, wl_feat, edge_attr):
         if edge_attr is None:  # Unused.
-            out = torch.cat([source, target, radial], dim=1)
+            out = torch.cat([ source, target, radial], dim=1)
         else:
             out = torch.cat([source, target, radial, wl_feat, edge_attr], dim=1)
         out = self.edge_mlp_feat(out)
@@ -505,17 +512,22 @@ class E_GCL_vel_feat(E_GCL):
             out = out * att_val
         return out
         
+    def edge_model_no_wl(self, source, target, radial, edge_attr):
+        if edge_attr is None:  # Unused.
+            out = torch.cat([source, target, radial], dim=1)
+        else:
+            out = torch.cat([source, target, radial, edge_attr], dim=1)
+        out = self.edge_mlp_no_wl(out)
+        if self.attention:
+            att_val = self.att_mlp(out)
+            out = out * att_val
+        return out
     def forward(self, h, edge_index, coord, vel, edge_attr=None, node_attr=None):
         row, col = edge_index
-        #coord update
-        if self.one_wl:
-            radial, coord_diff = self.coord2radial(edge_index, coord)
-            edge_feat = self.edge_model(h[row], h[col], radial, edge_attr)
-        elif not self.one_wl:
-            feat, coord_diff, coord_prod = self.coordvel2feat(edge_index, coord, vel)
-            wl_feat = self.mixed_wl(edge_index, coord, vel)            
-            edge_feat = self.edge_model_feat(h[row], h[col], feat, wl_feat, edge_attr)
-        
+        feat,radial, coord_diff, coord_prod = self.coordvel2feat(edge_index, coord, vel) #TODO: return NODE features from WL as well
+        wl_feat = self.mixed_wl(edge_index, coord, vel)            
+        edge_feat = self.edge_model_feat(h[row], h[col], radial, wl_feat, edge_attr)
+    
         coord = self.coord_model(coord, edge_index, coord_diff, edge_feat)
         
         if self.so:
@@ -524,11 +536,191 @@ class E_GCL_vel_feat(E_GCL):
         
         
         h, agg = self.node_model(h, edge_index, edge_feat, node_attr)
+        #TODO: add node features from summing over tuples
+        #h = torch.zeros_like(h)
         # coord = self.node_coord_model(h, coord)
         # x = self.node_model(x, edge_index, x[col], u, batch)  # GCN
         
         return h, coord, edge_attr
 
+class E_GCL_vel_feat_hidden(E_GCL):
+    """Graph Neural Net with global state and fixed number of nodes per graph.
+    Args:
+          hidden_dim: Number of hidden units.
+          num_nodes: Maximum number of nodes (for self-attentive pooling).
+          global_agg: Global aggregation function ('attn' or 'sum').
+          temp: Softmax temperature.
+    """
+
+
+    def __init__(self, input_nf, output_nf, hidden_nf, edges_in_d=0, nodes_att_dim=0, act_fn=nn.ReLU(), recurrent=True, coords_weight=1.0, attention=False, norm_diff=False, tanh=False, model_config=dict(), color_steps=3, so=False, one_wl=False):
+        E_GCL.__init__(self, input_nf, output_nf, hidden_nf, edges_in_d=edges_in_d, nodes_att_dim=nodes_att_dim, act_fn=act_fn, recurrent=recurrent, coords_weight=coords_weight, attention=attention, norm_diff=norm_diff, tanh=tanh)
+        self.one_wl = one_wl
+        self.hidden_nf = hidden_nf
+        self.norm_diff = norm_diff
+        self.color_steps = color_steps
+        self.coord_mlp_vel = nn.Sequential(
+            nn.Linear(input_nf, hidden_nf),
+            act_fn,
+            nn.Linear(hidden_nf, 1))
+        self.coord_mlp_vel_other = nn.Sequential(
+            nn.Linear(input_nf, hidden_nf),
+            act_fn,
+            nn.Linear(hidden_nf, 1))
+        self.edge_mlp_feat = nn.Sequential(
+                    nn.Linear( input_nf * 2  + 1 + hidden_nf*2 + edges_in_d, hidden_nf),
+                    act_fn,
+                    nn.Linear(hidden_nf, hidden_nf),
+                    act_fn
+            )#maybe add a layer
+        self.edge_mlp_no_wl = nn.Sequential(
+                    nn.Linear(input_nf * 2 + 10 + edges_in_d, hidden_nf),
+                    act_fn,
+                    nn.Linear(hidden_nf, hidden_nf),
+                    act_fn
+            )#maybe add a layer
+        self.so = so
+        
+        
+        rbound_upper = 10
+        
+        
+        ef_dim = 3
+        self.ef_dim=ef_dim
+        self.init_color = TwoFDisInit(ef_dim=(4*ef_dim+ 2*hidden_nf), k_tuple_dim=hidden_nf*2, activation_fn=act_fn) #TODO: increase ef?
+        self.rbf_fn = rbf_class_mapping["nexpnorm"](
+                    num_rbf=ef_dim, 
+                    rbound_upper=rbound_upper, 
+                    rbf_trainable=False,
+                )
+
+                # interaction layers
+        self.interaction_layers = nn.ModuleList()
+        for _ in range(color_steps):
+            self.interaction_layers.append(
+                    TwoFDisLayer(
+                        hidden_dim=hidden_nf*2,
+                        activation_fn=act_fn,
+                        )
+                    )
+        
+    def mixed_wl(self, edge_index, coord, vel, kemb):
+        row, col = edge_index
+        # apply WL to batch
+        B = coord.size(0)//5
+        coord, vel = coord.clone().reshape(B, 5, 3), vel.clone().reshape(B, 5, 3)
+        
+        coord_dist = coord.unsqueeze(2) - coord.unsqueeze(1) # (B, N, N, 3)
+        coord_dist = torch.norm(coord_dist.clone(), dim=-1, keepdim=True) # (B, N, N, 1)
+        rbf_coord_dist = self.rbf_fn(coord_dist.reshape(-1, 1)).reshape(coord.size(0), 5, 5,self.ef_dim) # (B, N, N, ef_dim)
+        
+        vel_dist = vel.unsqueeze(2) - vel.unsqueeze(1) # (B, N, N, 3)
+        vel_dist = torch.norm(vel_dist.clone(), dim=-1, keepdim=True) # (B, N, N, 1)
+        rbf_vel_dist = self.rbf_fn(vel_dist.reshape(-1, 1)).reshape(coord.size(0), 5, 5,self.ef_dim) # (B, N, N, ef_dim)
+        
+        mixed_dist = coord.unsqueeze(2) - vel.unsqueeze(1) # (B, N, N, 3)
+        mixed_dist_coord = torch.norm(mixed_dist.clone(), dim=-1, keepdim=True) # (B, N, N, 1)
+        rbf_mixed_dist_coord = self.rbf_fn(mixed_dist_coord.reshape(-1, 1)).reshape(coord.size(0), 5, 5,self.ef_dim) # (B, N, N, ef_dim)
+        
+        
+        mixed_dist_vel = torch.transpose(mixed_dist_coord, dim0=1, dim1=2)
+        rbf_mixed_dist_vel = self.rbf_fn(mixed_dist_vel.reshape(-1, 1)).reshape(coord.size(0), 5, 5,self.ef_dim) # (B, N, N, ef_dim)
+        
+        #add norms 
+        vel_norms = torch.diag_embed(torch.linalg.vector_norm(vel, ord=2, dim=2)).unsqueeze(3) # (B, N, N, 1)
+        rbf_norms = self.rbf_fn(vel_norms.reshape(-1, 1)).reshape(coord.size(0), 5, 5,self.ef_dim) # (B, N, N, ef_dim)
+        
+       
+        #concatenate along -1 dimension
+        if kemb==None:
+            mixed_dist = torch.cat([rbf_coord_dist, rbf_vel_dist, rbf_mixed_dist_coord, rbf_mixed_dist_vel, torch.zeros(B,5,5, 2*self.hidden_nf).cuda()], dim=-1) # (B, N, N, 4*ef_dim)
+        else:
+            mixed_dist = torch.cat([rbf_coord_dist, rbf_vel_dist, rbf_mixed_dist_coord, rbf_mixed_dist_vel, kemb], dim=-1) # (B, N, N, 4*ef_dim +hidden_nf)
+            
+            
+        
+        
+        #print(self.rbf_fn(coord_dist.reshape(-1, 1)).size())
+        #run wl
+        kemb = self.init_color(mixed_dist)
+        for i in range(self.color_steps):
+            kemb += self.interaction_layers[i](
+                        kemb=kemb.clone(),
+                        )   # (B, N ,N, hidden_nf)
+        #return to reg shape and create three lists of index list to query result from wl
+        batch   = torch.floor_divide(row, 5)
+        rowidx  = torch.remainder(row, 5)
+        colidx  = torch.remainder(col, 5)
+        
+        #assert same sizes
+        
+        return kemb[batch, rowidx, colidx], kemb
+        
+        
+    def coordvel2feat(self, edge_index, coord, vel):
+        row, col = edge_index
+
+        coord_diff = coord[row] - coord[col]
+        coord_prod = torch.cross(coord[row], coord[col], dim=1)
+        radial = torch.sum((coord_diff)**2, 1).unsqueeze(1)
+        
+        coord_i_vel_i = coord[row] - vel[row]
+        coord_i_vel_i = torch.sum((coord_i_vel_i.clone())**2, 1).unsqueeze(1)
+        
+        coord_i_vel_j = coord[row] - vel[col]
+        coord_i_vel_j = torch.sum((coord_i_vel_j.clone())**2, 1).unsqueeze(1)
+        
+        coord_j_vel_i = coord[col] - vel[row]
+        coord_j_vel_i = torch.sum((coord_j_vel_i.clone())**2, 1).unsqueeze(1)
+        
+        coord_j_vel_j = coord[col] - vel[col]
+        coord_j_vel_j = torch.sum((coord_j_vel_j.clone())**2, 1).unsqueeze(1)
+        
+        vel_i_vel_j   = vel[row] - vel[col]
+        vel_i_vel_j = torch.sum((vel_i_vel_j.clone())**2, 1).unsqueeze(1)
+        
+        norms = torch.cat(( torch.sum((coord[row])**2, 1).unsqueeze(1),  torch.sum((coord[col])**2, 1).unsqueeze(1), torch.sum((vel[col])**2, 1).unsqueeze(1), torch.sum((vel[col])**2, 1).unsqueeze(1) ), dim=1)
+        feat = torch.cat((radial,coord_i_vel_i,coord_i_vel_j,coord_j_vel_i, coord_j_vel_j, vel_i_vel_j, norms), dim=1)
+        
+        if self.norm_diff:
+            norm = torch.sqrt(radial) + 1
+            coord_diff = coord_diff/(norm)
+
+        return feat, radial, coord_diff, coord_prod
+        
+    def edge_model_feat(self, source, target, radial, wl_feat, edge_attr):
+        if edge_attr is None:  # Unused.
+            out = torch.cat([ source, target, radial], dim=1)
+        else:
+            out = torch.cat([source, target, radial, wl_feat, edge_attr], dim=1)
+        out = self.edge_mlp_feat(out)
+        if self.attention:
+            att_val = self.att_mlp(out)
+            out = out * att_val
+        return out
+        
+
+    def forward(self, h, edge_index, coord, vel, edge_attr=None, node_attr=None, kemb=None):
+        row, col = edge_index
+        feat,radial, coord_diff, coord_prod = self.coordvel2feat(edge_index, coord, vel) #TODO: return NODE features from WL as well
+
+        wl_feat, kemb = self.mixed_wl(edge_index, coord, vel, kemb)            
+        edge_feat = self.edge_model_feat(h[row], h[col], radial, wl_feat, edge_attr)
+    
+        coord = self.coord_model(coord, edge_index, coord_diff, edge_feat)
+        
+        if self.so:
+          coord = self.coord_prod_model(coord, edge_index, coord_prod, edge_feat)
+        coord += self.coord_mlp_vel(h) * vel
+        
+        h, agg = self.node_model(h, edge_index, edge_feat, node_attr)
+        
+        #TODO: add node features from summing over tuples
+        #h = torch.zeros_like(h)
+        # coord = self.node_coord_model(h, coord)
+        # x = self.node_model(x, edge_index, x[col], u, batch)  # GCN
+        
+        return h, coord, edge_feat, kemb
 
 
         

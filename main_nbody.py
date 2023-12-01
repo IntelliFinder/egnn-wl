@@ -2,11 +2,12 @@ import argparse
 import torch
 from n_body_system.dataset_nbody import NBodyDataset
 from n_body_system.model import GNN, EGNN, Baseline, Linear, EGNN_vel, Linear_dynamics, RF_vel, EGNN_vel_feat
-import os
+import os, sys
 from torch import nn, optim
 import json
 import time
-
+seed=42
+torch.manual_seed(seed)
 parser = argparse.ArgumentParser(description='VAE MNIST Example')
 parser.add_argument('--exp_name', type=str, default='exp_1', metavar='N', help='experiment_name')
 parser.add_argument('--batch_size', type=int, default=100, metavar='N',

@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from models.gcl import GCL, E_GCL, E_GCL_vel, GCL_rf_vel, E_GCL_vel_feat
+from models.gcl import GCL, E_GCL, E_GCL_vel, GCL_rf_vel, E_GCL_vel_feat_hidden
 import numpy as np
 
 
@@ -117,17 +117,18 @@ class EGNN_vel_feat(nn.Module):
         
         if one_wl:   
           for i in range(0, n_layers):
-              self.add_module("gcl_%d" % i, E_GCL_vel_feat(self.hidden_nf, self.hidden_nf, self.hidden_nf, edges_in_d=in_edge_nf, act_fn=act_fn, coords_weight=coords_weight, recurrent=recurrent, norm_diff=norm_diff, tanh=tanh, model_config=self.model_config, color_steps=color_steps, so=so, one_wl=(i==0)))
+              self.add_module("gcl_%d" % i, E_GCL_vel_feat_hidden(self.hidden_nf, self.hidden_nf, self.hidden_nf, edges_in_d=in_edge_nf, act_fn=act_fn, coords_weight=coords_weight, recurrent=recurrent, norm_diff=norm_diff, tanh=tanh, model_config=self.model_config, color_steps=color_steps, so=so, one_wl=True))
         else:
            for i in range(0, n_layers):
-              self.add_module("gcl_%d" % i, E_GCL_vel_feat(self.hidden_nf, self.hidden_nf, self.hidden_nf, edges_in_d=in_edge_nf, act_fn=act_fn, coords_weight=coords_weight, recurrent=recurrent, norm_diff=norm_diff, tanh=tanh, model_config=self.model_config, color_steps=color_steps, so=so, one_wl=one_wl))
+              self.add_module("gcl_%d" % i, E_GCL_vel_feat_hidden(self.hidden_nf, self.hidden_nf, self.hidden_nf, edges_in_d=in_edge_nf, act_fn=act_fn, coords_weight=coords_weight, recurrent=recurrent, norm_diff=norm_diff, tanh=tanh, model_config=self.model_config, color_steps=color_steps, so=so, one_wl=one_wl))
         self.to(self.device)
 
 
     def forward(self, h, x, edges, vel, edge_attr):
         h = self.embedding(h)
+        kemb=None
         for i in range(0, self.n_layers):
-            h, x, _ = self._modules["gcl_%d" % i](h, edges, x.clone(), vel.clone(), edge_attr=edge_attr)
+            h, x, _, kemb = self._modules["gcl_%d" % i](h, edges, x.clone(), vel.clone(), edge_attr=edge_attr, kemb=kemb)
         return x
 
 
